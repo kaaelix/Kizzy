@@ -41,6 +41,9 @@ class CustomRpcService : Service() {
     lateinit var kizzyRPC: com.my.kizzy.data.rpc.KizzyRPC
 
     @Inject
+    lateinit var gameTelemetryManager: com.my.kizzy.data.rpc.GameTelemetryManager
+
+    @Inject
     lateinit var scope: CoroutineScope
 
     @Inject
@@ -112,6 +115,8 @@ class CustomRpcService : Service() {
                         setStreamUrl(it.url.ifEmpty { null })
                         setApplicationId(it.applicationId.ifEmpty { null })
                         build()
+                        val appId = it.applicationId.ifEmpty { it.name }
+                        gameTelemetryManager.start(it.name, appId)
                     }
                 }
             }
@@ -121,6 +126,7 @@ class CustomRpcService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        gameTelemetryManager.stop()
         kizzyRPC.closeRPC()
         wakeLock?.let {
             if (it.isHeld) it.release()

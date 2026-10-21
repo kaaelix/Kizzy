@@ -48,6 +48,9 @@ class AppDetectionService : Service() {
     lateinit var kizzyRPC: KizzyRPC
 
     @Inject
+    lateinit var gameTelemetryManager: com.my.kizzy.data.rpc.GameTelemetryManager
+
+    @Inject
     lateinit var scope: CoroutineScope
 
     @Inject
@@ -77,6 +80,7 @@ class AppDetectionService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        gameTelemetryManager.stop()
         kizzyRPC.closeRPC()
         super.onDestroy()
     }
@@ -216,6 +220,7 @@ class AppDetectionService : Service() {
                 }
             }
             build()
+            gameTelemetryManager.start(appName, packageName)
         }
 
         notificationManager.notify(
@@ -231,6 +236,7 @@ class AppDetectionService : Service() {
     }
 
     private fun handleDisabledPackage() {
+        gameTelemetryManager.stop()
         if (kizzyRPC.isRpcRunning()) {
             kizzyRPC.closeRPC()
         }
