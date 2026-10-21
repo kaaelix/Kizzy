@@ -38,7 +38,7 @@ class KizzyRepositoryImpl @Inject constructor(
 
     override suspend fun getImage(url: String): String? {
         return if (Prefs[Prefs.USE_IMGUR, false]) {
-            imgurApi.getImage(url, Prefs[Prefs.TOKEN]).getOrNull()?.toExternalAsset()
+            imgurApi.getImage(url, Prefs.getPrimaryToken()).getOrNull()?.toExternalAsset()
         } else {
             api.getImage(url).getOrNull()?.toAttachmentAsset()
         }

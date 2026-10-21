@@ -21,7 +21,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.components.ServiceComponent
 import kizzy.gateway.DiscordWebSocket
-import kizzy.gateway.DiscordWebSocketImpl
+import kizzy.gateway.MultiDiscordWebSocket
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,14 +33,17 @@ object ServiceModule {
     fun providesDiscordWebsocket(
         logger: Logger
     ): DiscordWebSocket =
-        DiscordWebSocketImpl(Prefs[Prefs.TOKEN, ""], logger)
+        MultiDiscordWebSocket(
+            tokenSupplier = { Prefs.getActiveRpcTokens() },
+            logger = logger
+        )
 
     @Provides
     fun provideKizzyRpc(
         kizzyRepository: KizzyRepository,
         discordWebSocket: DiscordWebSocket,
         logger: Logger
-    ) = KizzyRPC(Prefs[Prefs.TOKEN, ""], kizzyRepository, discordWebSocket, logger)
+    ) = KizzyRPC(Prefs.getPrimaryToken(), kizzyRepository, discordWebSocket, logger)
 
     @Provides
     fun providesCoroutineScope(): CoroutineScope {

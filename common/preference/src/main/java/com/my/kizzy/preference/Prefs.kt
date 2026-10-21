@@ -98,11 +98,76 @@ object Prefs {
         set(ENABLED_MEDIA_APPS, Json.encodeToString(enabledPackages))
     }
 
-    fun getUser(): User? {
-        val userJson = get(USER_DATA, "")
-        return when {
-            userJson.isNotEmpty() -> Json.decodeFromString(userJson)
-            else -> null
+    fun getUser(accountIndex: Int = 1): User? {
+        val key = if (accountIndex == 2) USER_DATA_2 else USER_DATA
+        val userJson = get(key, "")
+        if (userJson.isNotEmpty()) {
+            val user = runCatching { Json.decodeFromString<User>(userJson) }.getOrNull()
+            if (user != null) return user
+        }
+        if (accountIndex == 1) {
+            val user2Json = get(USER_DATA_2, "")
+            if (user2Json.isNotEmpty()) {
+                return runCatching { Json.decodeFromString<User>(user2Json) }.getOrNull()
+            }
+        }
+        return null
+    }
+
+    fun getToken(accountIndex: Int = 1): String {
+        return if (accountIndex == 2) get(TOKEN_2, "") else get(TOKEN, "")
+    }
+
+    fun setToken(accountIndex: Int = 1, token: String) {
+        if (accountIndex == 2) set(TOKEN_2, token) else set(TOKEN, token)
+    }
+
+    fun isAccountLoggedIn(accountIndex: Int): Boolean {
+        return getToken(accountIndex).isNotBlank()
+    }
+
+    fun hasAnyToken(): Boolean {
+        return getToken(1).isNotBlank() || getToken(2).isNotBlank()
+    }
+
+    fun getPrimaryToken(): String {
+        val t1 = getToken(1)
+        if (t1.isNotBlank()) return t1
+        return getToken(2)
+    }
+
+    fun getActiveRpcTokens(): List<String> {
+        val list = mutableListOf<String>()
+        val t1 = getToken(1)
+        val t2 = getToken(2)
+        val t1Enabled = get(ACCOUNT_1_RPC_ENABLED, true)
+        val t2Enabled = get(ACCOUNT_2_RPC_ENABLED, true)
+
+        if (t1.isNotBlank() && t1Enabled) list.add(t1)
+        if (t2.isNotBlank() && t2Enabled) list.add(t2)
+
+        if (list.isEmpty()) {
+            if (t1.isNotBlank()) list.add(t1)
+            if (t2.isNotBlank()) list.add(t2)
+        }
+        return list
+    }
+
+    fun clearAccount(accountIndex: Int) {
+        if (accountIndex == 2) {
+            remove(TOKEN_2)
+            remove(USER_ID_2)
+            remove(USER_BIO_2)
+            remove(USER_NITRO_2)
+            remove(USER_DATA_2)
+            remove(ACCOUNT_2_RPC_ENABLED)
+        } else {
+            remove(TOKEN)
+            remove(USER_ID)
+            remove(USER_BIO)
+            remove(USER_NITRO)
+            remove(USER_DATA)
+            remove(ACCOUNT_1_RPC_ENABLED)
         }
     }
 
@@ -132,12 +197,24 @@ object Prefs {
         }
     }
 
-    //User Preferences
+    //User Preferences - Account 1 (Primary)
     const val USER_DATA = "user" //Json Data Referencing User_Data class
     const val TOKEN = "token"
     const val USER_ID = "user-id"
     const val USER_BIO = "user-bio"
     const val USER_NITRO = "user-nitro"
+    const val ACCOUNT_1_RPC_ENABLED = "account_1_rpc_enabled"
+
+    //User Preferences - Account 2 (Secondary)
+    const val USER_DATA_2 = "user_2"
+    const val TOKEN_2 = "token_2"
+    const val USER_ID_2 = "user_id_2"
+    const val USER_BIO_2 = "user_bio_2"
+    const val USER_NITRO_2 = "user_nitro_2"
+    const val ACCOUNT_2_RPC_ENABLED = "account_2_rpc_enabled"
+
+    // Multi-Account Selection
+    const val SELECTED_ACCOUNT_INDEX = "selected_account_index"
     const val LAST_RUN_CONSOLE_RPC = "last_run_console_rpc"
     const val LAST_RUN_CUSTOM_RPC = "last_run_custom_rpc"
     const val LANGUAGE = "language"

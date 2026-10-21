@@ -44,7 +44,7 @@ private val NON_ACCESSIBLE_COUNTRIES = listOf("TR", "RU")
 @Composable
 internal fun DiscordLoginButton(
     onClick: () -> Unit,
-    enabled: Boolean
+    enabled: Boolean = true
 ) {
     val context = LocalContext.current
     var showVpnDialog by remember { mutableStateOf(false) }

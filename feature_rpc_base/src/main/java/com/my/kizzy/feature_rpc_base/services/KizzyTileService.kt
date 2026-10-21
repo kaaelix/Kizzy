@@ -93,7 +93,7 @@ class KizzyTileService : TileService() {
     }
 
     private fun updateTile() {
-        if (Prefs[Prefs.TOKEN, ""].isEmpty()) {
+        if (!Prefs.hasAnyToken()) {
             qsTile.state = Tile.STATE_UNAVAILABLE
             qsTile.updateTile()
             return

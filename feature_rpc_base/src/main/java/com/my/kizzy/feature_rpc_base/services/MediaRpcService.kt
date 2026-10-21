@@ -72,8 +72,7 @@ class MediaRpcService : Service() {
     @SuppressLint("WakelockTimeout")
     override fun onCreate() {
         super.onCreate()
-        val token = Prefs[TOKEN, ""]
-        if (token.isEmpty()) stopSelf()
+        if (!Prefs.hasAnyToken()) stopSelf()
         setupWakeLock()
         val intent = Intent(this, MediaRpcService::class.java)
         intent.action = Constants.ACTION_STOP_SERVICE

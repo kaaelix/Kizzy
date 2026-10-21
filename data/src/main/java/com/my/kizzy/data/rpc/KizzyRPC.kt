@@ -70,7 +70,7 @@ class KizzyRPC(
             RegexOption.IGNORE_CASE
         )
         return regex.matches(token)*/
-        return token.isNotBlank()
+        return token.isNotBlank() || Prefs.hasAnyToken()
     }
 
     /**

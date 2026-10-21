@@ -166,23 +166,11 @@ internal fun ComponentActivity.Kizzy(
                 )
             }
             composable(Routes.PROFILE) {
-                var loggedIn by remember {
-                    mutableStateOf(Prefs[Prefs.TOKEN, ""].isNotEmpty())
-                }
-                if (loggedIn) {
-                    val viewModel by viewModels<UserViewModel>()
-                    UserScreen(
-                        state = viewModel.state.value,
-                        onBackPressed = navController::navigateUp
-                    )
-                } else {
-                    LoginScreen(
-                        onBackPressed = navController::navigateUp,
-                        onCompleted = {
-                            loggedIn = true
-                        },
-                    )
-                }
+                val viewModel by viewModels<UserViewModel>()
+                UserScreen(
+                    viewModel = viewModel,
+                    onBackPressed = navController::navigateUp
+                )
             }
             composable(Routes.CONSOLE_RPC) {
                 val viewModel by viewModels<GamesViewModel>()
