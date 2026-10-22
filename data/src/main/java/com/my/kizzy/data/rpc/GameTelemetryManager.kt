@@ -87,8 +87,9 @@ class GameTelemetryManager @Inject constructor(
             val games = repository.getGames()
             val found = games.firstOrNull { it.game_title.equals(gameName, ignoreCase = true) }
                 ?: games.firstOrNull { it.game_title.contains(gameName, ignoreCase = true) }
-            if (found?.application_id != null && found.application_id.isNotBlank() && found.application_id.all { it.isDigit() }) {
-                return found.application_id
+            val candidate = found?.application_id
+            if (!candidate.isNullOrBlank() && candidate.all { it.isDigit() }) {
+                return candidate
             }
         }
         return rawAppId
