@@ -9,6 +9,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
@@ -47,6 +48,8 @@ class GameTelemetryManager @Inject constructor(
     private val accountSessionIds = ConcurrentHashMap<String, String>()
     // Map of token -> (questId -> targetApplicationId)
     private val activeQuestTargets = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
+    // Set of token -> Set of questId where console/start was activated
+    private val activeConsoleQuests = ConcurrentHashMap<String, MutableSet<String>>()
 
     companion object {
         private const val TAG = "GameTelemetry"
@@ -114,16 +117,29 @@ class GameTelemetryManager @Inject constructor(
                 durationTrackedMs = elapsed
             )
 
+            // Stop active console sessions for previous game
+            val consoleQuests = activeConsoleQuests[token]
+            consoleQuests?.forEach { questId ->
+                try {
+                    client.post("https://discord.com/api/v9/quests/$questId/console/stop") {
+                        header(HttpHeaders.Authorization, token)
+                        header("User-Agent", USER_AGENT)
+                        header("X-Super-Properties", SUPER_PROPERTIES)
+                        contentType(ContentType.Application.Json)
+                    }
+                } catch (e: Exception) {
+                    logger.d(TAG, "console/stop failed for quest $questId: ${e.message}")
+                }
+            }
+            consoleQuests?.clear()
+
             // Terminal heartbeat to active Quests for previous game
             val targetsMap = activeQuestTargets[token]
             targetsMap?.forEach { (questId, targetAppId) ->
                 try {
                     val bodyPayload = buildJsonObject {
-                        put("stream_key", null as String?)
                         put("application_id", targetAppId)
                         put("terminal", true)
-                        put("executable_path", null as String?)
-                        put("executable_fingerprint", null as String?)
                     }
                     client.post("https://discord.com/api/v9/quests/$questId/heartbeat") {
                         header(HttpHeaders.Authorization, token)
@@ -138,6 +154,7 @@ class GameTelemetryManager @Inject constructor(
             }
         }
         activeQuestTargets.clear()
+        activeConsoleQuests.clear()
     }
 
     private suspend fun resolveApplicationId(gameName: String, rawAppId: String): String {
@@ -267,6 +284,7 @@ class GameTelemetryManager @Inject constructor(
                 val questsObj = questsResp.body<JsonObject>()
                 val questsArray = questsObj["quests"]?.jsonArray
                 val targetsMap = activeQuestTargets.getOrPut(token) { ConcurrentHashMap() }
+                val consoleQuests = activeConsoleQuests.getOrPut(token) { ConcurrentHashMap.newKeySet() }
 
                 questsArray?.forEach { questEl ->
                     val quest = questEl.jsonObject
@@ -274,15 +292,32 @@ class GameTelemetryManager @Inject constructor(
 
                     val userStatus = quest["user_status"]?.jsonObject
                     val completedAt = userStatus?.get("completed_at")?.jsonPrimitive?.content
+                    val claimedAt = userStatus?.get("claimed_at")?.jsonPrimitive?.content
                     if (completedAt != null) {
-                        // Already completed, skip
+                        // If quest is completed but not claimed yet, try auto-claiming reward!
+                        if (claimedAt.isNullOrBlank()) {
+                            try {
+                                val claimResp = client.post("https://discord.com/api/v9/quests/$questId/claim-reward") {
+                                    header(HttpHeaders.Authorization, token)
+                                    header("User-Agent", USER_AGENT)
+                                    header("X-Super-Properties", SUPER_PROPERTIES)
+                                    contentType(ContentType.Application.Json)
+                                    setBody("""{"platform":0}""")
+                                }
+                                logger.i(TAG, "Quest $questId auto-claimed reward status: ${claimResp.status.value}")
+                            } catch (e: Exception) {
+                                logger.d(TAG, "Quest $questId reward claim attempt skipped: ${e.message}")
+                            }
+                        }
                         targetsMap.remove(questId)
+                        consoleQuests.remove(questId)
                         return@forEach
                     }
 
                     // Extract candidate application IDs and game titles from quest
                     val candidateAppIds = mutableListOf<String>()
                     val candidateGameNames = mutableListOf<String>()
+                    val desktopAppIds = mutableListOf<String>()
 
                     val config = quest["config"]?.jsonObject
                     config?.get("application_id")?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
@@ -291,29 +326,40 @@ class GameTelemetryManager @Inject constructor(
                     config?.get("messages")?.jsonObject?.get("game_title")?.jsonPrimitive?.content?.let {
                         candidateGameNames.add(it)
                     }
+                    config?.get("messages")?.jsonObject?.get("quest_name")?.jsonPrimitive?.content?.let {
+                        candidateGameNames.add(it)
+                    }
 
                     // Parse task_config_v2 tasks
                     val taskConfigV2 = config?.get("task_config_v2")?.jsonObject
                     val tasks = taskConfigV2?.get("tasks")?.jsonObject
-                    tasks?.values?.forEach { taskEl ->
+                    tasks?.forEach { (taskKey, taskEl) ->
                         val taskObj = runCatching { taskEl.jsonObject }.getOrNull()
                         val apps = taskObj?.get("applications")?.jsonArray
+                        val isDesktopTask = taskKey.contains("desktop", ignoreCase = true) ||
+                                            taskKey.contains("play", ignoreCase = true)
                         apps?.forEach { appEl ->
                             val appObj = runCatching { appEl.jsonObject }.getOrNull()
-                            appObj?.get("id")?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
-                            appObj?.get("name")?.jsonPrimitive?.content?.let { candidateGameNames.add(it) }
+                            appObj?.get("id")?.jsonPrimitive?.content?.let { id ->
+                                candidateAppIds.add(id)
+                                if (isDesktopTask) desktopAppIds.add(id)
+                            }
+                            appObj?.get("name")?.jsonPrimitive?.content?.let { name ->
+                                candidateGameNames.add(name)
+                            }
                         }
                     }
 
-                    // Check if current running game matches this quest
+                    // Check if current running game matches this quest using smart fuzzy matching
                     val matchesId = applicationId.isNotBlank() && candidateAppIds.contains(applicationId)
-                    val matchesName = gameName.isNotBlank() && candidateGameNames.any { it.equals(gameName, ignoreCase = true) }
+                    val matchesName = candidateGameNames.any { isMatchingGame(gameName, it) }
 
                     if (matchesId || matchesName) {
+                        // Official desktop app ID prioritized so Discord validates the heartbeat
                         val targetAppId = if (matchesId) {
                             applicationId
                         } else {
-                            candidateAppIds.firstOrNull() ?: applicationId
+                            desktopAppIds.firstOrNull() ?: candidateAppIds.firstOrNull() ?: applicationId
                         }
 
                         targetsMap[questId] = targetAppId
@@ -338,13 +384,26 @@ class GameTelemetryManager @Inject constructor(
                             }
                         }
 
-                        // Send quest heartbeat
+                        // Activate console session if quest supports cross-platform / console
+                        if (!consoleQuests.contains(questId)) {
+                            try {
+                                val consoleResp = client.post("https://discord.com/api/v9/quests/$questId/console/start") {
+                                    header(HttpHeaders.Authorization, token)
+                                    header("User-Agent", USER_AGENT)
+                                    header("X-Super-Properties", SUPER_PROPERTIES)
+                                    contentType(ContentType.Application.Json)
+                                }
+                                consoleQuests.add(questId)
+                                logger.i(TAG, "Quest $questId console/start called with status: ${consoleResp.status.value}")
+                            } catch (e: Exception) {
+                                logger.d(TAG, "Quest $questId console/start ignored: ${e.message}")
+                            }
+                        }
+
+                        // Send quest heartbeat (clean payload matching Discord desktop client)
                         val bodyPayload = buildJsonObject {
-                            put("stream_key", null as String?)
                             put("application_id", targetAppId)
                             put("terminal", terminal)
-                            put("executable_path", null as String?)
-                            put("executable_fingerprint", null as String?)
                         }
                         val questHbResp = client.post("https://discord.com/api/v9/quests/$questId/heartbeat") {
                             header(HttpHeaders.Authorization, token)
@@ -353,13 +412,97 @@ class GameTelemetryManager @Inject constructor(
                             contentType(ContentType.Application.Json)
                             setBody(bodyPayload.toString())
                         }
-                        logger.i(TAG, "Quest heartbeat sent for quest $questId (targetAppId=$targetAppId, terminal=$terminal), status: ${questHbResp.status.value}")
+                        val hbStatus = questHbResp.status.value
+                        val hbBody = runCatching { questHbResp.bodyAsText() }.getOrDefault("")
+                        logger.i(TAG, "Quest heartbeat sent for quest $questId (targetAppId=$targetAppId, terminal=$terminal), status: $hbStatus, body: $hbBody")
+
+                        // If heartbeat returned completion, trigger reward claim immediately
+                        if (hbBody.contains("completed_at") && !hbBody.contains("\"completed_at\":null")) {
+                            logger.i(TAG, "Quest $questId completed! Triggering auto-claim...")
+                            try {
+                                val claimResp = client.post("https://discord.com/api/v9/quests/$questId/claim-reward") {
+                                    header(HttpHeaders.Authorization, token)
+                                    header("User-Agent", USER_AGENT)
+                                    header("X-Super-Properties", SUPER_PROPERTIES)
+                                    contentType(ContentType.Application.Json)
+                                    setBody("""{"platform":0}""")
+                                }
+                                logger.i(TAG, "Quest $questId claim reward status: ${claimResp.status.value}, body: ${claimResp.bodyAsText()}")
+                            } catch (e: Exception) {
+                                logger.w(TAG, "Failed claiming quest $questId: ${e.message}")
+                            }
+                        }
                     }
                 }
             }
         } catch (e: Exception) {
             logger.d(TAG, "Quests progress skipped: ${e.message}")
         }
+    }
+
+    private fun isMatchingGame(runningGame: String, candidateTitle: String): Boolean {
+        if (runningGame.isBlank() || candidateTitle.isBlank()) return false
+        val cleanA = expandAbbreviations(cleanGameName(runningGame))
+        val cleanB = expandAbbreviations(cleanGameName(candidateTitle))
+
+        if (cleanA == cleanB) return true
+        if (cleanA.contains(cleanB) || cleanB.contains(cleanA)) return true
+
+        val stopWords = setOf(
+            "the", "a", "an", "of", "and", "in", "on", "for", "to", "edition",
+            "remastered", "bundle", "game", "online", "client"
+        )
+        val tokensA = cleanA.split(" ").filter { it.length > 1 && it !in stopWords }.toSet()
+        val tokensB = cleanB.split(" ").filter { it.length > 1 && it !in stopWords }.toSet()
+
+        if (tokensA.isNotEmpty() && tokensB.isNotEmpty()) {
+            val intersection = tokensA.intersect(tokensB)
+            if (tokensA.contains("call") && tokensB.contains("call") &&
+                tokensA.contains("duty") && tokensB.contains("duty")
+            ) {
+                return true
+            }
+            if (intersection.any { it.length >= 5 }) return true
+            if (intersection.size >= 2) return true
+            if (intersection.size.toDouble() / tokensA.size >= 0.5 ||
+                intersection.size.toDouble() / tokensB.size >= 0.5
+            ) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun cleanGameName(name: String): String {
+        return name.lowercase()
+            .replace(Regex("[®™©:;!?\"'\",_\\-\\.\\[\\]\\(\\)]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private fun expandAbbreviations(name: String): String {
+        val map = mapOf(
+            "cod" to "call of duty",
+            "lol" to "league of legends",
+            "cs2" to "counter strike",
+            "csgo" to "counter strike",
+            "r6" to "rainbow six",
+            "r6s" to "rainbow six",
+            "gta" to "grand theft auto",
+            "gta5" to "grand theft auto",
+            "gtav" to "grand theft auto",
+            "mc" to "minecraft",
+            "hsr" to "honkai star rail",
+            "genshin" to "genshin impact",
+            "destiny" to "destiny 2",
+            "fortnite" to "fortnite",
+            "apex" to "apex legends",
+            "valorant" to "valorant",
+            "pubg" to "pubg battlegrounds",
+            "warframe" to "warframe"
+        )
+        val tokens = name.split(" ")
+        return tokens.joinToString(" ") { map[it] ?: it }
     }
 
     suspend fun stop() {
@@ -389,16 +532,29 @@ class GameTelemetryManager @Inject constructor(
                     durationTrackedMs = elapsed
                 )
 
+                // Stop active console sessions
+                val consoleQuests = activeConsoleQuests[token]
+                consoleQuests?.forEach { questId ->
+                    try {
+                        client.post("https://discord.com/api/v9/quests/$questId/console/stop") {
+                            header(HttpHeaders.Authorization, token)
+                            header("User-Agent", USER_AGENT)
+                            header("X-Super-Properties", SUPER_PROPERTIES)
+                            contentType(ContentType.Application.Json)
+                        }
+                    } catch (e: Exception) {
+                        logger.d(TAG, "console/stop failed for quest $questId: ${e.message}")
+                    }
+                }
+                consoleQuests?.clear()
+
                 // Terminal heartbeat to active Quests
                 val targetsMap = activeQuestTargets[token]
                 targetsMap?.forEach { (questId, targetAppId) ->
                     try {
                         val bodyPayload = buildJsonObject {
-                            put("stream_key", null as String?)
                             put("application_id", targetAppId)
                             put("terminal", true)
-                            put("executable_path", null as String?)
-                            put("executable_fingerprint", null as String?)
                         }
                         client.post("https://discord.com/api/v9/quests/$questId/heartbeat") {
                             header(HttpHeaders.Authorization, token)
@@ -412,12 +568,14 @@ class GameTelemetryManager @Inject constructor(
                         logger.e(TAG, "Error sending terminal quest heartbeat: ${e.message}")
                     }
                 }
+                targetsMap?.clear()
             }
         }
 
         trackingJob?.cancel()
         trackingJob = null
         activeQuestTargets.clear()
+        activeConsoleQuests.clear()
         currentGameName = null
         currentApplicationId = null
         logger.i(TAG, "Game telemetry tracking stopped gracefully.")
