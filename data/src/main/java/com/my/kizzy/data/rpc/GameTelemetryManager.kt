@@ -377,29 +377,8 @@ class GameTelemetryManager @Inject constructor(
 
                     val userStatus = quest["user_status"]?.jsonObject
                     val completedAt = userStatus?.get("completed_at")?.jsonPrimitive?.content
-                    val claimedAt = userStatus?.get("claimed_at")?.jsonPrimitive?.content
                     if (completedAt != null) {
-                        // If quest is completed but not claimed yet, try auto-claiming reward!
-                        if (claimedAt.isNullOrBlank()) {
-                            try {
-                                val claimPayload = buildJsonObject {
-                                    put("platform", 0)
-                                    put("location", "quest_home")
-                                }
-                                val claimResp = client.post("https://discord.com/api/v9/quests/$questId/claim-reward") {
-                                    header(HttpHeaders.Authorization, token)
-                                    header("User-Agent", USER_AGENT)
-                                    header("X-Super-Properties", SUPER_PROPERTIES)
-                                    header("X-Discord-Locale", "en-US")
-                                    header("X-Discord-Timezone", "UTC")
-                                    contentType(ContentType.Application.Json)
-                                    setBody(claimPayload.toString())
-                                }
-                                logger.i(TAG, "Quest $questId auto-claimed reward status: ${claimResp.status.value}, body: ${claimResp.bodyAsText()}")
-                            } catch (e: Exception) {
-                                logger.w(TAG, "Quest $questId reward claim attempt skipped: ${e.message}")
-                            }
-                        }
+                        logger.i(TAG, "Quest $questId is already completed (completedAt=$completedAt). Ready for manual claim in Discord.")
                         targetsMap.remove(questId)
                         consoleQuests.remove(questId)
                         return@forEach
@@ -520,27 +499,11 @@ class GameTelemetryManager @Inject constructor(
                         val hbBody = runCatching { questHbResp.bodyAsText() }.getOrDefault("")
                         logger.i(TAG, "Quest heartbeat sent for quest $questId (targetAppId=$targetAppId, terminal=$terminal), status: $hbStatus, body: $hbBody")
 
-                        // If heartbeat returned completion, trigger reward claim immediately
+                        // If heartbeat returned completion, quest is 100% finished and ready for manual claim in Discord
                         if (hbBody.contains("completed_at") && !hbBody.contains("\"completed_at\":null")) {
-                            logger.i(TAG, "Quest $questId completed! Triggering auto-claim...")
-                            try {
-                                val claimPayload = buildJsonObject {
-                                    put("platform", 0)
-                                    put("location", "quest_home")
-                                }
-                                val claimResp = client.post("https://discord.com/api/v9/quests/$questId/claim-reward") {
-                                    header(HttpHeaders.Authorization, token)
-                                    header("User-Agent", USER_AGENT)
-                                    header("X-Super-Properties", SUPER_PROPERTIES)
-                                    header("X-Discord-Locale", "en-US")
-                                    header("X-Discord-Timezone", "UTC")
-                                    contentType(ContentType.Application.Json)
-                                    setBody(claimPayload.toString())
-                                }
-                                logger.i(TAG, "Quest $questId claim reward status: ${claimResp.status.value}, body: ${claimResp.bodyAsText()}")
-                            } catch (e: Exception) {
-                                logger.w(TAG, "Failed claiming quest $questId: ${e.message}")
-                            }
+                            logger.i(TAG, "Quest $questId reached 100% completion! Ready for user to claim reward safely inside Discord client.")
+                            targetsMap.remove(questId)
+                            consoleQuests.remove(questId)
                         }
                     }
                 }
