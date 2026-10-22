@@ -4,7 +4,6 @@ import com.my.kizzy.domain.interfaces.Logger
 import com.my.kizzy.domain.repository.KizzyRepository
 import com.my.kizzy.preference.Prefs
 import io.ktor.client.HttpClient
-import io.ktor.client.call.body
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -19,6 +18,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
@@ -41,6 +43,12 @@ class GameTelemetryManager @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var trackingJob: Job? = null
 
+    private val jsonParser = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        coerceInputValues = true
+    }
+
     private var currentGameName: String? = null
     private var currentApplicationId: String? = null
     private var sessionStartTime: Long = 0L
@@ -57,6 +65,50 @@ class GameTelemetryManager @Inject constructor(
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.165 Chrome/134.0.6998.205 Electron/35.4.0 Safari/537.36"
         private const val SUPER_PROPERTIES =
             "eyJvcyI6IkxpbnV4IiwiYnJvd3NlciI6IkRpc2NvcmQgQ2xpZW50IiwicmVsZWFzZV9jaGFubmVsIjoic3RhYmxlIiwiY2xpZW50X3ZlcnNpb24iOiIxLjAuMTY1Iiwib3NfdmVyc2lvbiI6IjYuNi4xMzcrIiwib3NfYXJjaCI6Ing2NCIsImFwcF9hcmNoIjoieDY0Iiwic3lzdGVtX2xvY2FsZSI6ImVuLVVTIiwiYnJvd3Nlcl91c2VyX2FnZW50IjoiTW96aWxsYS81LjAgKFgxMTsgTGludXggeDg2XzY0KSBBcHBsZVdlYktpdC81MzcuMzYgKEtIVE1MLCBsaWtlIEdlY2tvKSBkaXNjb3JkLzEuMC4xNjUgQ2hyb21lLzEzNC4wLjY5OTguMjA1IEVsZWN0cm9uLzM1LjQuMCBTYWZhcmkvNTM3LjM2IiwiYnJvd3Nlcl92ZXJzaW9uIjoiMzUuNC4wIiwiY2xpZW50X2J1aWxkX251bWJlciI6NjQzMTg2LCJjbGllbnRfZXZlbnRfc291cmNlIjpudWxsLCJjbGllbnRfYXBwX3N0YXRlIjoiZm9jdXNlZCIsImhhc19jbGllbnRfbW9kcyI6ZmFsc2V9"
+
+        val KNOWN_GAME_IDS = mapOf(
+            "call of duty: modern warfare 4" to "1511443377927880775",
+            "call of duty: modern warfare iv" to "1511443377927880775",
+            "call of duty modern warfare 4" to "1511443377927880775",
+            "modern warfare 4" to "1511443377927880775",
+            "call of duty" to "1445181071103627284",
+            "call of duty: warzone" to "1445181071103627284",
+            "call of duty: modern warfare" to "1445181071103627284",
+            "call of duty: black ops 6" to "1445181071103627284",
+            "league of legends" to "401518687463948290",
+            "valorant" to "700136079562375258",
+            "genshin impact" to "762434991303950386",
+            "honkai: star rail" to "1098522646399008809",
+            "honkai star rail" to "1098522646399008809",
+            "minecraft" to "432980957394370572",
+            "fortnite" to "402016428784189440",
+            "counter strike 2" to "710189746684821535",
+            "counter-strike 2" to "710189746684821535",
+            "grand theft auto v" to "438029511594835978",
+            "gta v" to "438029511594835978",
+            "apex legends" to "542387796919910400",
+            "overwatch 2" to "356875221078245376",
+            "roblox" to "435553657014648832",
+            "cyberpunk 2077" to "543886561237893120",
+            "rocket league" to "437672437637840896",
+            "dead by daylight" to "438058223945416715",
+            "tom clancy's rainbow six siege" to "438057999818588160",
+            "rainbow six siege" to "438057999818588160",
+            "warframe" to "438075677941727232",
+            "destiny 2" to "438059737409552384",
+            "dota 2" to "438058444456755200",
+            "world of warcraft" to "356875936882262016",
+            "the sims 4" to "438059049443295243",
+            "monster hunter: world" to "473919632168583168",
+            "the witcher 3: wild hunt" to "438059424883441664",
+            "rust" to "438058694072369152",
+            "terraria" to "438059287310532608",
+            "among us" to "478881268478443520",
+            "elden ring" to "940286821269667850",
+            "black myth: wukong" to "1275811059471716393",
+            "helldivers 2" to "1203063806294724648",
+            "palworld" to "1197621457855078501"
+        )
     }
 
     fun start(gameName: String, applicationId: String) {
@@ -125,6 +177,8 @@ class GameTelemetryManager @Inject constructor(
                         header(HttpHeaders.Authorization, token)
                         header("User-Agent", USER_AGENT)
                         header("X-Super-Properties", SUPER_PROPERTIES)
+                        header("X-Discord-Locale", "en-US")
+                        header("X-Discord-Timezone", "UTC")
                         contentType(ContentType.Application.Json)
                     }
                 } catch (e: Exception) {
@@ -145,6 +199,8 @@ class GameTelemetryManager @Inject constructor(
                         header(HttpHeaders.Authorization, token)
                         header("User-Agent", USER_AGENT)
                         header("X-Super-Properties", SUPER_PROPERTIES)
+                        header("X-Discord-Locale", "en-US")
+                        header("X-Discord-Timezone", "UTC")
                         contentType(ContentType.Application.Json)
                         setBody(bodyPayload.toString())
                     }
@@ -158,19 +214,26 @@ class GameTelemetryManager @Inject constructor(
     }
 
     private suspend fun resolveApplicationId(gameName: String, rawAppId: String): String {
-        if (rawAppId.isNotBlank() && rawAppId.all { it.isDigit() }) {
+        if (rawAppId.isNotBlank() && rawAppId.all { it.isDigit() } && rawAppId != Constants.APPLICATION_ID) {
             return rawAppId
         }
+        val cleanName = cleanGameName(gameName)
+        KNOWN_GAME_IDS[cleanName]?.let { return it }
+        val expanded = expandAbbreviations(cleanName)
+        KNOWN_GAME_IDS[expanded]?.let { return it }
+
         runCatching {
             val games = repository.getGames()
             val found = games.firstOrNull { it.game_title.equals(gameName, ignoreCase = true) }
                 ?: games.firstOrNull { it.game_title.contains(gameName, ignoreCase = true) }
+                ?: games.firstOrNull { cleanGameName(it.game_title) == cleanName }
+                ?: games.firstOrNull { isMatchingGame(gameName, it.game_title) }
             val candidate = found?.application_id
             if (!candidate.isNullOrBlank() && candidate.all { it.isDigit() }) {
                 return candidate
             }
         }
-        return rawAppId
+        return rawAppId.takeIf { it.isNotBlank() && it.all { c -> c.isDigit() } } ?: Constants.APPLICATION_ID
     }
 
     private suspend fun trackForAccount(token: String, gameName: String, applicationId: String) {
@@ -181,11 +244,19 @@ class GameTelemetryManager @Inject constructor(
                     header(HttpHeaders.Authorization, token)
                     header("User-Agent", USER_AGENT)
                     header("X-Super-Properties", SUPER_PROPERTIES)
+                    header("X-Discord-Locale", "en-US")
+                    header("X-Discord-Timezone", "UTC")
                 }
                 if (userResp.status.value in 200..299) {
-                    val json = userResp.body<JsonObject>()
+                    val rawText = userResp.bodyAsText()
+                    val json = jsonParser.parseToJsonElement(rawText).jsonObject
                     analyticsToken = json["analytics_token"]?.jsonPrimitive?.content
-                    analyticsToken?.let { accountAnalyticsTokens[token] = it }
+                    analyticsToken?.let {
+                        accountAnalyticsTokens[token] = it
+                        logger.i(TAG, "Successfully fetched analytics token for account: ${token.take(8)}...")
+                    }
+                } else {
+                    logger.w(TAG, "Failed fetching analytics token, HTTP ${userResp.status.value}")
                 }
             } catch (e: Exception) {
                 logger.w(TAG, "Failed to fetch analytics token: ${e.message}")
@@ -236,15 +307,20 @@ class GameTelemetryManager @Inject constructor(
         isFinal: Boolean,
         durationTrackedMs: Long
     ) {
-        if (analyticsToken.isNullOrBlank()) return
+        if (analyticsToken.isNullOrBlank()) {
+            logger.w(TAG, "Skipping science heartbeat: analyticsToken is missing")
+            return
+        }
         try {
+            val now = System.currentTimeMillis()
             val payload = buildJsonObject {
                 put("token", analyticsToken)
                 putJsonArray("events") {
                     add(buildJsonObject {
                         put("type", "running_game_heartbeat")
                         putJsonObject("properties") {
-                            put("client_track_timestamp", System.currentTimeMillis())
+                            put("client_track_timestamp", now)
+                            put("client_send_timestamp", now)
                             put("client_heartbeat_session_id", sessionId)
                             put("event_sequence_number", seq)
                             put("game_id", applicationId)
@@ -264,10 +340,12 @@ class GameTelemetryManager @Inject constructor(
                 header(HttpHeaders.Authorization, token)
                 header("User-Agent", USER_AGENT)
                 header("X-Super-Properties", SUPER_PROPERTIES)
+                header("X-Discord-Locale", "en-US")
+                header("X-Discord-Timezone", "UTC")
                 contentType(ContentType.Application.Json)
                 setBody(payload.toString())
             }
-            logger.d(TAG, "Heartbeat sent to /science (initial=$isInitial, final=$isFinal, duration=${durationTrackedMs}ms), status: ${scienceResp.status.value}")
+            logger.i(TAG, "Heartbeat sent to /science (initial=$isInitial, final=$isFinal, duration=${durationTrackedMs}ms, game='$gameName', id=$applicationId), status: ${scienceResp.status.value}")
         } catch (e: Exception) {
             logger.e(TAG, "Error sending heartbeat to science: ${e.message}")
         }
@@ -279,10 +357,17 @@ class GameTelemetryManager @Inject constructor(
                 header(HttpHeaders.Authorization, token)
                 header("User-Agent", USER_AGENT)
                 header("X-Super-Properties", SUPER_PROPERTIES)
+                header("X-Discord-Locale", "en-US")
+                header("X-Discord-Timezone", "UTC")
             }
             if (questsResp.status.value in 200..299) {
-                val questsObj = questsResp.body<JsonObject>()
-                val questsArray = questsObj["quests"]?.jsonArray
+                val rawText = questsResp.bodyAsText()
+                val parsedEl = jsonParser.parseToJsonElement(rawText)
+                val questsArray = when (parsedEl) {
+                    is JsonObject -> parsedEl["quests"]?.jsonArray
+                    is JsonArray -> parsedEl
+                    else -> null
+                }
                 val targetsMap = activeQuestTargets.getOrPut(token) { ConcurrentHashMap() }
                 val consoleQuests = activeConsoleQuests.getOrPut(token) { ConcurrentHashMap.newKeySet() }
 
@@ -297,16 +382,22 @@ class GameTelemetryManager @Inject constructor(
                         // If quest is completed but not claimed yet, try auto-claiming reward!
                         if (claimedAt.isNullOrBlank()) {
                             try {
+                                val claimPayload = buildJsonObject {
+                                    put("platform", 0)
+                                    put("location", "quest_home")
+                                }
                                 val claimResp = client.post("https://discord.com/api/v9/quests/$questId/claim-reward") {
                                     header(HttpHeaders.Authorization, token)
                                     header("User-Agent", USER_AGENT)
                                     header("X-Super-Properties", SUPER_PROPERTIES)
+                                    header("X-Discord-Locale", "en-US")
+                                    header("X-Discord-Timezone", "UTC")
                                     contentType(ContentType.Application.Json)
-                                    setBody("""{"platform":0}""")
+                                    setBody(claimPayload.toString())
                                 }
-                                logger.i(TAG, "Quest $questId auto-claimed reward status: ${claimResp.status.value}")
+                                logger.i(TAG, "Quest $questId auto-claimed reward status: ${claimResp.status.value}, body: ${claimResp.bodyAsText()}")
                             } catch (e: Exception) {
-                                logger.d(TAG, "Quest $questId reward claim attempt skipped: ${e.message}")
+                                logger.w(TAG, "Quest $questId reward claim attempt skipped: ${e.message}")
                             }
                         }
                         targetsMap.remove(questId)
@@ -350,6 +441,13 @@ class GameTelemetryManager @Inject constructor(
                         }
                     }
 
+                    // For Call of Duty quests, explicitly associate both detectable IDs
+                    if (candidateGameNames.any { it.contains("call of duty", ignoreCase = true) || it.contains("modern warfare", ignoreCase = true) }) {
+                        candidateAppIds.add("1511443377927880775")
+                        candidateAppIds.add("1445181071103627284")
+                        desktopAppIds.add("1511443377927880775")
+                    }
+
                     // Check if current running game matches this quest using smart fuzzy matching
                     val matchesId = applicationId.isNotBlank() && candidateAppIds.contains(applicationId)
                     val matchesName = candidateGameNames.any { isMatchingGame(gameName, it) }
@@ -375,6 +473,8 @@ class GameTelemetryManager @Inject constructor(
                                     header(HttpHeaders.Authorization, token)
                                     header("User-Agent", USER_AGENT)
                                     header("X-Super-Properties", SUPER_PROPERTIES)
+                                    header("X-Discord-Locale", "en-US")
+                                    header("X-Discord-Timezone", "UTC")
                                     contentType(ContentType.Application.Json)
                                     setBody(enrollPayload.toString())
                                 }
@@ -391,6 +491,8 @@ class GameTelemetryManager @Inject constructor(
                                     header(HttpHeaders.Authorization, token)
                                     header("User-Agent", USER_AGENT)
                                     header("X-Super-Properties", SUPER_PROPERTIES)
+                                    header("X-Discord-Locale", "en-US")
+                                    header("X-Discord-Timezone", "UTC")
                                     contentType(ContentType.Application.Json)
                                 }
                                 consoleQuests.add(questId)
@@ -409,6 +511,8 @@ class GameTelemetryManager @Inject constructor(
                             header(HttpHeaders.Authorization, token)
                             header("User-Agent", USER_AGENT)
                             header("X-Super-Properties", SUPER_PROPERTIES)
+                            header("X-Discord-Locale", "en-US")
+                            header("X-Discord-Timezone", "UTC")
                             contentType(ContentType.Application.Json)
                             setBody(bodyPayload.toString())
                         }
@@ -420,12 +524,18 @@ class GameTelemetryManager @Inject constructor(
                         if (hbBody.contains("completed_at") && !hbBody.contains("\"completed_at\":null")) {
                             logger.i(TAG, "Quest $questId completed! Triggering auto-claim...")
                             try {
+                                val claimPayload = buildJsonObject {
+                                    put("platform", 0)
+                                    put("location", "quest_home")
+                                }
                                 val claimResp = client.post("https://discord.com/api/v9/quests/$questId/claim-reward") {
                                     header(HttpHeaders.Authorization, token)
                                     header("User-Agent", USER_AGENT)
                                     header("X-Super-Properties", SUPER_PROPERTIES)
+                                    header("X-Discord-Locale", "en-US")
+                                    header("X-Discord-Timezone", "UTC")
                                     contentType(ContentType.Application.Json)
-                                    setBody("""{"platform":0}""")
+                                    setBody(claimPayload.toString())
                                 }
                                 logger.i(TAG, "Quest $questId claim reward status: ${claimResp.status.value}, body: ${claimResp.bodyAsText()}")
                             } catch (e: Exception) {
@@ -434,9 +544,11 @@ class GameTelemetryManager @Inject constructor(
                         }
                     }
                 }
+            } else {
+                logger.w(TAG, "Fetching quests/@me returned status: ${questsResp.status.value}")
             }
         } catch (e: Exception) {
-            logger.d(TAG, "Quests progress skipped: ${e.message}")
+            logger.e(TAG, "Quests progress error: ${e.message}", e)
         }
     }
 
@@ -540,6 +652,8 @@ class GameTelemetryManager @Inject constructor(
                             header(HttpHeaders.Authorization, token)
                             header("User-Agent", USER_AGENT)
                             header("X-Super-Properties", SUPER_PROPERTIES)
+                            header("X-Discord-Locale", "en-US")
+                            header("X-Discord-Timezone", "UTC")
                             contentType(ContentType.Application.Json)
                         }
                     } catch (e: Exception) {
@@ -560,6 +674,8 @@ class GameTelemetryManager @Inject constructor(
                             header(HttpHeaders.Authorization, token)
                             header("User-Agent", USER_AGENT)
                             header("X-Super-Properties", SUPER_PROPERTIES)
+                            header("X-Discord-Locale", "en-US")
+                            header("X-Discord-Timezone", "UTC")
                             contentType(ContentType.Application.Json)
                             setBody(bodyPayload.toString())
                         }

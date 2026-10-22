@@ -293,13 +293,18 @@ class KizzyRPC(
             val name = activityName
             var matchedId: String? = null
             if (!name.isNullOrBlank()) {
-                runCatching {
-                    val games = kizzyRepository.getGames()
-                    val found = games.firstOrNull { it.game_title.equals(name, ignoreCase = true) }
-                        ?: games.firstOrNull { it.game_title.contains(name, ignoreCase = true) }
-                    val candidate = found?.application_id
-                    if (!candidate.isNullOrBlank() && candidate.all { it.isDigit() }) {
-                        matchedId = candidate
+                val clean = name.lowercase().replace(Regex("[®™©:;!?\"'\",_\\-\\.\\[\\]\\(\\)]"), " ").trim()
+                matchedId = GameTelemetryManager.KNOWN_GAME_IDS[clean]
+                    ?: GameTelemetryManager.KNOWN_GAME_IDS[clean.replace("cod", "call of duty")]
+                if (matchedId == null) {
+                    runCatching {
+                        val games = kizzyRepository.getGames()
+                        val found = games.firstOrNull { it.game_title.equals(name, ignoreCase = true) }
+                            ?: games.firstOrNull { it.game_title.contains(name, ignoreCase = true) }
+                        val candidate = found?.application_id
+                        if (!candidate.isNullOrBlank() && candidate.all { it.isDigit() }) {
+                            matchedId = candidate
+                        }
                     }
                 }
             }
@@ -314,7 +319,7 @@ class KizzyRPC(
                     details = details?.sanitize(),
                     party = party.takeIf { party != null },
                     type = type,
-                    platform = platform?.sanitize(),
+                    platform = if (platform?.lowercase() == "desktop" || platform.isNullOrBlank()) null else platform?.sanitize(),
                     timestamps = Timestamps(
                         start = startTimestamps,
                         end = stopTimestamps

@@ -211,7 +211,10 @@ fun GamesScreen(
                             }
                         }
                         LazyColumn {
-                            items(state.games) { game ->
+                            items(
+                                items = state.games,
+                                key = { "${it.application_id}_${it.game_title}" }
+                            ) { game ->
                                 SingleChoiceGameItem(
                                     game = game,
                                     selected = game.game_title == selected
@@ -221,7 +224,7 @@ fun GamesScreen(
                                         RpcConfig(
                                             name = info.game_title,
                                             details = "",
-                                            platform = "desktop",
+                                            platform = "",
                                             timestampsStart = System.currentTimeMillis().toString(),
                                             status = "online",
                                             largeImg = info.large_image ?: "",
