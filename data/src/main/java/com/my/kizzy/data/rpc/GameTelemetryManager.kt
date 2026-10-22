@@ -21,11 +21,10 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
@@ -33,6 +32,15 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+
+private val JsonElement?.asObj: JsonObject?
+    get() = this as? JsonObject
+
+private val JsonElement?.asArr: JsonArray?
+    get() = this as? JsonArray
+
+private val JsonElement?.asStr: String?
+    get() = (this as? JsonPrimitive)?.takeIf { this !is JsonNull }?.content
 
 @Singleton
 class GameTelemetryManager @Inject constructor(
@@ -249,8 +257,8 @@ class GameTelemetryManager @Inject constructor(
                 }
                 if (userResp.status.value in 200..299) {
                     val rawText = userResp.bodyAsText()
-                    val json = jsonParser.parseToJsonElement(rawText).jsonObject
-                    analyticsToken = json["analytics_token"]?.jsonPrimitive?.content
+                    val json = jsonParser.parseToJsonElement(rawText).asObj
+                    analyticsToken = json?.get("analytics_token").asStr
                     analyticsToken?.let {
                         accountAnalyticsTokens[token] = it
                         logger.i(TAG, "Successfully fetched analytics token for account: ${token.take(8)}...")
@@ -364,7 +372,7 @@ class GameTelemetryManager @Inject constructor(
                 val rawText = questsResp.bodyAsText()
                 val parsedEl = jsonParser.parseToJsonElement(rawText)
                 val questsArray = when (parsedEl) {
-                    is JsonObject -> parsedEl["quests"]?.jsonArray
+                    is JsonObject -> parsedEl["quests"].asArr
                     is JsonArray -> parsedEl
                     else -> null
                 }
@@ -372,11 +380,11 @@ class GameTelemetryManager @Inject constructor(
                 val consoleQuests = activeConsoleQuests.getOrPut(token) { ConcurrentHashMap.newKeySet() }
 
                 questsArray?.forEach { questEl ->
-                    val quest = questEl.jsonObject
-                    val questId = quest["id"]?.jsonPrimitive?.content ?: return@forEach
+                    val quest = questEl.asObj ?: return@forEach
+                    val questId = quest["id"].asStr ?: return@forEach
 
-                    val userStatus = quest["user_status"]?.jsonObject
-                    val completedAt = userStatus?.get("completed_at")?.jsonPrimitive?.content
+                    val userStatus = quest["user_status"].asObj
+                    val completedAt = userStatus?.get("completed_at").asStr
                     if (completedAt != null) {
                         logger.i(TAG, "Quest $questId is already completed (completedAt=$completedAt). Ready for manual claim in Discord.")
                         targetsMap.remove(questId)
@@ -389,32 +397,29 @@ class GameTelemetryManager @Inject constructor(
                     val candidateGameNames = mutableListOf<String>()
                     val desktopAppIds = mutableListOf<String>()
 
-                    val config = quest["config"]?.jsonObject
-                    config?.get("application_id")?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
-                    quest["application_id"]?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
+                    val config = quest["config"].asObj
+                    config?.get("application_id").asStr?.let { candidateAppIds.add(it) }
+                    quest["application_id"].asStr?.let { candidateAppIds.add(it) }
 
-                    config?.get("messages")?.jsonObject?.get("game_title")?.jsonPrimitive?.content?.let {
-                        candidateGameNames.add(it)
-                    }
-                    config?.get("messages")?.jsonObject?.get("quest_name")?.jsonPrimitive?.content?.let {
-                        candidateGameNames.add(it)
-                    }
+                    val messages = config?.get("messages").asObj
+                    messages?.get("game_title").asStr?.let { candidateGameNames.add(it) }
+                    messages?.get("quest_name").asStr?.let { candidateGameNames.add(it) }
 
                     // Parse task_config_v2 tasks
-                    val taskConfigV2 = config?.get("task_config_v2")?.jsonObject
-                    val tasks = taskConfigV2?.get("tasks")?.jsonObject
+                    val taskConfigV2 = config?.get("task_config_v2").asObj
+                    val tasks = taskConfigV2?.get("tasks").asObj
                     tasks?.forEach { (taskKey, taskEl) ->
-                        val taskObj = runCatching { taskEl.jsonObject }.getOrNull()
-                        val apps = taskObj?.get("applications")?.jsonArray
+                        val taskObj = taskEl.asObj
+                        val apps = taskObj?.get("applications").asArr
                         val isDesktopTask = taskKey.contains("desktop", ignoreCase = true) ||
                                             taskKey.contains("play", ignoreCase = true)
                         apps?.forEach { appEl ->
-                            val appObj = runCatching { appEl.jsonObject }.getOrNull()
-                            appObj?.get("id")?.jsonPrimitive?.content?.let { id ->
+                            val appObj = appEl.asObj
+                            appObj?.get("id").asStr?.let { id ->
                                 candidateAppIds.add(id)
                                 if (isDesktopTask) desktopAppIds.add(id)
                             }
-                            appObj?.get("name")?.jsonPrimitive?.content?.let { name ->
+                            appObj?.get("name").asStr?.let { name ->
                                 candidateGameNames.add(name)
                             }
                         }
@@ -442,7 +447,7 @@ class GameTelemetryManager @Inject constructor(
                         targetsMap[questId] = targetAppId
 
                         // Check enrollment: if user_status or enrolled_at is null, auto-enroll first!
-                        val enrolledAt = userStatus?.get("enrolled_at")?.jsonPrimitive?.content
+                        val enrolledAt = userStatus?.get("enrolled_at").asStr
                         if (enrolledAt.isNullOrBlank()) {
                             try {
                                 val enrollPayload = buildJsonObject {
