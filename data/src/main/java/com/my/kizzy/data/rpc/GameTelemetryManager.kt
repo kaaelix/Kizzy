@@ -64,8 +64,6 @@ class GameTelemetryManager @Inject constructor(
     private val accountSessionIds = ConcurrentHashMap<String, String>()
     // Map of token -> (questId -> targetApplicationId)
     private val activeQuestTargets = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
-    // Set of token -> Set of questId where console/start was activated
-    private val activeConsoleQuests = ConcurrentHashMap<String, MutableSet<String>>()
 
     companion object {
         private const val TAG = "GameTelemetry"
@@ -177,24 +175,6 @@ class GameTelemetryManager @Inject constructor(
                 durationTrackedMs = elapsed
             )
 
-            // Stop active console sessions for previous game
-            val consoleQuests = activeConsoleQuests[token]
-            consoleQuests?.forEach { questId ->
-                try {
-                    client.post("https://discord.com/api/v9/quests/$questId/console/stop") {
-                        header(HttpHeaders.Authorization, token)
-                        header("User-Agent", USER_AGENT)
-                        header("X-Super-Properties", SUPER_PROPERTIES)
-                        header("X-Discord-Locale", "en-US")
-                        header("X-Discord-Timezone", "UTC")
-                        contentType(ContentType.Application.Json)
-                    }
-                } catch (e: Exception) {
-                    logger.d(TAG, "console/stop failed for quest $questId: ${e.message}")
-                }
-            }
-            consoleQuests?.clear()
-
             // Terminal heartbeat to active Quests for previous game
             val targetsMap = activeQuestTargets[token]
             targetsMap?.forEach { (questId, targetAppId) ->
@@ -218,7 +198,6 @@ class GameTelemetryManager @Inject constructor(
             }
         }
         activeQuestTargets.clear()
-        activeConsoleQuests.clear()
     }
 
     private suspend fun resolveApplicationId(gameName: String, rawAppId: String): String {
@@ -235,7 +214,7 @@ class GameTelemetryManager @Inject constructor(
             val found = games.firstOrNull { it.game_title.equals(gameName, ignoreCase = true) }
                 ?: games.firstOrNull { it.game_title.contains(gameName, ignoreCase = true) }
                 ?: games.firstOrNull { cleanGameName(it.game_title) == cleanName }
-                ?: games.firstOrNull { isMatchingGame(gameName, it.game_title) }
+                ?: games.firstOrNull { isExactOrPrefixMatch(gameName, it.game_title) }
             val candidate = found?.application_id
             if (!candidate.isNullOrBlank() && candidate.all { it.isDigit() }) {
                 return candidate
@@ -377,7 +356,6 @@ class GameTelemetryManager @Inject constructor(
                     else -> null
                 }
                 val targetsMap = activeQuestTargets.getOrPut(token) { ConcurrentHashMap() }
-                val consoleQuests = activeConsoleQuests.getOrPut(token) { ConcurrentHashMap.newKeySet() }
 
                 questsArray?.forEach { questEl ->
                     val quest = questEl.asObj ?: return@forEach
@@ -388,7 +366,6 @@ class GameTelemetryManager @Inject constructor(
                     if (completedAt != null) {
                         logger.i(TAG, "Quest $questId is already completed (completedAt=$completedAt). Ready for manual claim in Discord.")
                         targetsMap.remove(questId)
-                        consoleQuests.remove(questId)
                         return@forEach
                     }
 
@@ -403,7 +380,6 @@ class GameTelemetryManager @Inject constructor(
 
                     val messages = config?.get("messages").asObj
                     messages?.get("game_title").asStr?.let { candidateGameNames.add(it) }
-                    messages?.get("quest_name").asStr?.let { candidateGameNames.add(it) }
 
                     // Parse task_config_v2 tasks
                     val taskConfigV2 = config?.get("task_config_v2").asObj
@@ -426,22 +402,34 @@ class GameTelemetryManager @Inject constructor(
                     }
 
                     // For Call of Duty quests, explicitly associate both detectable IDs
-                    if (candidateGameNames.any { it.contains("call of duty", ignoreCase = true) || it.contains("modern warfare", ignoreCase = true) }) {
+                    if (candidateGameNames.any { isCodGame(it) }) {
                         candidateAppIds.add("1511443377927880775")
                         candidateAppIds.add("1445181071103627284")
                         desktopAppIds.add("1511443377927880775")
                     }
 
-                    // Check if current running game matches this quest using smart fuzzy matching
-                    val matchesId = applicationId.isNotBlank() && candidateAppIds.contains(applicationId)
-                    val matchesName = candidateGameNames.any { isMatchingGame(gameName, it) }
+                    val isCodRunning = isCodGame(gameName) || applicationId == "1511443377927880775" || applicationId == "1445181071103627284"
+                    val isCodQuest = candidateGameNames.any { isCodGame(it) } ||
+                                     candidateAppIds.contains("1511443377927880775") ||
+                                     candidateAppIds.contains("1445181071103627284")
 
-                    if (matchesId || matchesName) {
-                        // Official desktop app ID prioritized so Discord validates the heartbeat
-                        val targetAppId = if (matchesId) {
-                            applicationId
-                        } else {
-                            desktopAppIds.firstOrNull() ?: candidateAppIds.firstOrNull() ?: applicationId
+                    val matchesId = applicationId.isNotBlank() && candidateAppIds.contains(applicationId)
+                    val matchesCod = isCodRunning && isCodQuest
+                    val matchesName = candidateGameNames.any { isExactOrPrefixMatch(gameName, it) }
+
+                    val isMatch = matchesId || matchesCod || matchesName
+
+                    logger.i(TAG, "Quest $questId: titles=$candidateGameNames, appIds=$candidateAppIds, match=$isMatch")
+
+                    if (isMatch) {
+                        val targetAppId = when {
+                            matchesCod -> {
+                                if (candidateAppIds.contains("1511443377927880775")) "1511443377927880775"
+                                else if (candidateAppIds.contains("1445181071103627284")) "1445181071103627284"
+                                else desktopAppIds.firstOrNull() ?: candidateAppIds.firstOrNull() ?: applicationId
+                            }
+                            matchesId -> applicationId
+                            else -> desktopAppIds.firstOrNull() ?: candidateAppIds.firstOrNull() ?: applicationId
                         }
 
                         targetsMap[questId] = targetAppId
@@ -468,24 +456,6 @@ class GameTelemetryManager @Inject constructor(
                             }
                         }
 
-                        // Activate console session if quest supports cross-platform / console
-                        if (!consoleQuests.contains(questId)) {
-                            try {
-                                val consoleResp = client.post("https://discord.com/api/v9/quests/$questId/console/start") {
-                                    header(HttpHeaders.Authorization, token)
-                                    header("User-Agent", USER_AGENT)
-                                    header("X-Super-Properties", SUPER_PROPERTIES)
-                                    header("X-Discord-Locale", "en-US")
-                                    header("X-Discord-Timezone", "UTC")
-                                    contentType(ContentType.Application.Json)
-                                }
-                                consoleQuests.add(questId)
-                                logger.i(TAG, "Quest $questId console/start called with status: ${consoleResp.status.value}")
-                            } catch (e: Exception) {
-                                logger.d(TAG, "Quest $questId console/start ignored: ${e.message}")
-                            }
-                        }
-
                         // Send quest heartbeat (clean payload matching Discord desktop client)
                         val bodyPayload = buildJsonObject {
                             put("application_id", targetAppId)
@@ -508,7 +478,6 @@ class GameTelemetryManager @Inject constructor(
                         if (hbBody.contains("completed_at") && !hbBody.contains("\"completed_at\":null")) {
                             logger.i(TAG, "Quest $questId reached 100% completion! Ready for user to claim reward safely inside Discord client.")
                             targetsMap.remove(questId)
-                            consoleQuests.remove(questId)
                         }
                     }
                 }
@@ -520,36 +489,21 @@ class GameTelemetryManager @Inject constructor(
         }
     }
 
-    private fun isMatchingGame(runningGame: String, candidateTitle: String): Boolean {
+    private fun isCodGame(name: String): Boolean {
+        val lower = name.lowercase()
+        return lower.contains("call of duty") || lower.contains("modern warfare") || lower.contains("black ops") || lower.contains("warzone")
+    }
+
+    private fun isExactOrPrefixMatch(runningGame: String, candidateTitle: String): Boolean {
         if (runningGame.isBlank() || candidateTitle.isBlank()) return false
-        val cleanA = expandAbbreviations(cleanGameName(runningGame))
-        val cleanB = expandAbbreviations(cleanGameName(candidateTitle))
-
+        val cleanA = cleanGameName(runningGame)
+        val cleanB = cleanGameName(candidateTitle)
         if (cleanA == cleanB) return true
-        if (cleanA.contains(cleanB) || cleanB.contains(cleanA)) return true
-
-        val stopWords = setOf(
-            "the", "a", "an", "of", "and", "in", "on", "for", "to", "edition",
-            "remastered", "bundle", "game", "online", "client"
-        )
-        val tokensA = cleanA.split(" ").filter { it.length > 1 && it !in stopWords }.toSet()
-        val tokensB = cleanB.split(" ").filter { it.length > 1 && it !in stopWords }.toSet()
-
-        if (tokensA.isNotEmpty() && tokensB.isNotEmpty()) {
-            val intersection = tokensA.intersect(tokensB)
-            if (tokensA.contains("call") && tokensB.contains("call") &&
-                tokensA.contains("duty") && tokensB.contains("duty")
-            ) {
-                return true
-            }
-            if (intersection.any { it.length >= 5 }) return true
-            if (intersection.size >= 2) return true
-            if (intersection.size.toDouble() / tokensA.size >= 0.5 ||
-                intersection.size.toDouble() / tokensB.size >= 0.5
-            ) {
-                return true
-            }
-        }
+        if (cleanA.startsWith(cleanB) || cleanB.startsWith(cleanA)) return true
+        val expA = expandAbbreviations(cleanA)
+        val expB = expandAbbreviations(cleanB)
+        if (expA == expB) return true
+        if (expA.startsWith(expB) || expB.startsWith(expA)) return true
         return false
     }
 
@@ -612,24 +566,6 @@ class GameTelemetryManager @Inject constructor(
                     durationTrackedMs = elapsed
                 )
 
-                // Stop active console sessions
-                val consoleQuests = activeConsoleQuests[token]
-                consoleQuests?.forEach { questId ->
-                    try {
-                        client.post("https://discord.com/api/v9/quests/$questId/console/stop") {
-                            header(HttpHeaders.Authorization, token)
-                            header("User-Agent", USER_AGENT)
-                            header("X-Super-Properties", SUPER_PROPERTIES)
-                            header("X-Discord-Locale", "en-US")
-                            header("X-Discord-Timezone", "UTC")
-                            contentType(ContentType.Application.Json)
-                        }
-                    } catch (e: Exception) {
-                        logger.d(TAG, "console/stop failed for quest $questId: ${e.message}")
-                    }
-                }
-                consoleQuests?.clear()
-
                 // Terminal heartbeat to active Quests
                 val targetsMap = activeQuestTargets[token]
                 targetsMap?.forEach { (questId, targetAppId) ->
@@ -659,7 +595,6 @@ class GameTelemetryManager @Inject constructor(
         trackingJob?.cancel()
         trackingJob = null
         activeQuestTargets.clear()
-        activeConsoleQuests.clear()
         currentGameName = null
         currentApplicationId = null
         logger.i(TAG, "Game telemetry tracking stopped gracefully.")
