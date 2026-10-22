@@ -1,6 +1,7 @@
 package com.my.kizzy.data.rpc
 
 import com.my.kizzy.domain.interfaces.Logger
+import com.my.kizzy.domain.repository.KizzyRepository
 import com.my.kizzy.preference.Prefs
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
@@ -33,6 +34,7 @@ import javax.inject.Singleton
 @Singleton
 class GameTelemetryManager @Inject constructor(
     private val client: HttpClient,
+    private val repository: KizzyRepository,
     private val logger: Logger
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -43,7 +45,8 @@ class GameTelemetryManager @Inject constructor(
     private var sessionStartTime: Long = 0L
     private val accountAnalyticsTokens = ConcurrentHashMap<String, String>()
     private val accountSessionIds = ConcurrentHashMap<String, String>()
-    private val activeQuestIds = ConcurrentHashMap<String, MutableSet<String>>()
+    // Map of token -> (questId -> targetApplicationId)
+    private val activeQuestTargets = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()
 
     companion object {
         private const val TAG = "GameTelemetry"
@@ -54,8 +57,6 @@ class GameTelemetryManager @Inject constructor(
     }
 
     fun start(gameName: String, applicationId: String) {
-        if (applicationId.isBlank()) return
-
         val tokens = Prefs.getActiveRpcTokens()
         if (tokens.isEmpty()) return
 
@@ -63,16 +64,34 @@ class GameTelemetryManager @Inject constructor(
         currentApplicationId = applicationId
         sessionStartTime = System.currentTimeMillis()
 
-        logger.i(TAG, "Starting game telemetry tracking for '$gameName' (ID: $applicationId)")
+        logger.i(TAG, "Starting game telemetry tracking for '$gameName' (raw ID: $applicationId)")
 
         trackingJob?.cancel()
         trackingJob = scope.launch {
+            val resolvedAppId = resolveApplicationId(gameName, applicationId)
+            logger.i(TAG, "Resolved application ID for '$gameName': $resolvedAppId")
+
             tokens.forEach { token ->
                 launch {
-                    trackForAccount(token, gameName, applicationId)
+                    trackForAccount(token, gameName, resolvedAppId)
                 }
             }
         }
+    }
+
+    private suspend fun resolveApplicationId(gameName: String, rawAppId: String): String {
+        if (rawAppId.isNotBlank() && rawAppId.all { it.isDigit() }) {
+            return rawAppId
+        }
+        runCatching {
+            val games = repository.getGames()
+            val found = games.firstOrNull { it.game_title.equals(gameName, ignoreCase = true) }
+                ?: games.firstOrNull { it.game_title.contains(gameName, ignoreCase = true) }
+            if (found?.application_id != null && found.application_id.isNotBlank() && found.application_id.all { it.isDigit() }) {
+                return found.application_id
+            }
+        }
+        return rawAppId
     }
 
     private suspend fun trackForAccount(token: String, gameName: String, applicationId: String) {
@@ -119,10 +138,11 @@ class GameTelemetryManager @Inject constructor(
             )
             isInitial = false
 
-            // 2. Check and progress active Quests
-            progressQuests(token, applicationId, terminal = false)
+            // 2. Check, auto-enroll, and progress matching Quests
+            progressQuests(token, gameName, applicationId, terminal = false)
 
-            delay(30_000)
+            // Discord desktop client heartbeat interval is strictly 60 seconds (f.A.Millis.MINUTE)
+            delay(60_000)
         }
     }
 
@@ -168,13 +188,13 @@ class GameTelemetryManager @Inject constructor(
                 contentType(ContentType.Application.Json)
                 setBody(payload.toString())
             }
-            logger.d(TAG, "Heartbeat sent to /science (initial=$isInitial, final=$isFinal), status: ${scienceResp.status.value}")
+            logger.d(TAG, "Heartbeat sent to /science (initial=$isInitial, final=$isFinal, duration=${durationTrackedMs}ms), status: ${scienceResp.status.value}")
         } catch (e: Exception) {
             logger.e(TAG, "Error sending heartbeat to science: ${e.message}")
         }
     }
 
-    private suspend fun progressQuests(token: String, applicationId: String, terminal: Boolean) {
+    private suspend fun progressQuests(token: String, gameName: String, applicationId: String, terminal: Boolean) {
         try {
             val questsResp = client.get("https://discord.com/api/v9/quests/@me") {
                 header(HttpHeaders.Authorization, token)
@@ -184,19 +204,82 @@ class GameTelemetryManager @Inject constructor(
             if (questsResp.status.value in 200..299) {
                 val questsObj = questsResp.body<JsonObject>()
                 val questsArray = questsObj["quests"]?.jsonArray
-                val set = activeQuestIds.getOrPut(token) { ConcurrentHashMap.newKeySet() }
+                val targetsMap = activeQuestTargets.getOrPut(token) { ConcurrentHashMap() }
 
                 questsArray?.forEach { questEl ->
                     val quest = questEl.jsonObject
-                    val questId = quest["id"]?.jsonPrimitive?.content
-                    val targetAppId = quest["config"]?.jsonObject?.get("application_id")?.jsonPrimitive?.content
-                        ?: quest["application_id"]?.jsonPrimitive?.content
+                    val questId = quest["id"]?.jsonPrimitive?.content ?: return@forEach
 
-                    if (questId != null && (targetAppId == null || targetAppId == applicationId)) {
-                        set.add(questId)
+                    val userStatus = quest["user_status"]?.jsonObject
+                    val completedAt = userStatus?.get("completed_at")?.jsonPrimitive?.content
+                    if (completedAt != null) {
+                        // Already completed, skip
+                        targetsMap.remove(questId)
+                        return@forEach
+                    }
+
+                    // Extract candidate application IDs and game titles from quest
+                    val candidateAppIds = mutableListOf<String>()
+                    val candidateGameNames = mutableListOf<String>()
+
+                    val config = quest["config"]?.jsonObject
+                    config?.get("application_id")?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
+                    quest["application_id"]?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
+
+                    config?.get("messages")?.jsonObject?.get("game_title")?.jsonPrimitive?.content?.let {
+                        candidateGameNames.add(it)
+                    }
+
+                    // Parse task_config_v2 tasks
+                    val taskConfigV2 = config?.get("task_config_v2")?.jsonObject
+                    val tasks = taskConfigV2?.get("tasks")?.jsonObject
+                    tasks?.values?.forEach { taskEl ->
+                        val taskObj = runCatching { taskEl.jsonObject }.getOrNull()
+                        val apps = taskObj?.get("applications")?.jsonArray
+                        apps?.forEach { appEl ->
+                            val appObj = runCatching { appEl.jsonObject }.getOrNull()
+                            appObj?.get("id")?.jsonPrimitive?.content?.let { candidateAppIds.add(it) }
+                            appObj?.get("name")?.jsonPrimitive?.content?.let { candidateGameNames.add(it) }
+                        }
+                    }
+
+                    // Check if current running game matches this quest
+                    val matchesId = applicationId.isNotBlank() && candidateAppIds.contains(applicationId)
+                    val matchesName = gameName.isNotBlank() && candidateGameNames.any { it.equals(gameName, ignoreCase = true) }
+
+                    if (matchesId || matchesName) {
+                        val targetAppId = if (matchesId) {
+                            applicationId
+                        } else {
+                            candidateAppIds.firstOrNull() ?: applicationId
+                        }
+
+                        targetsMap[questId] = targetAppId
+
+                        // Check enrollment: if user_status or enrolled_at is null, auto-enroll first!
+                        val enrolledAt = userStatus?.get("enrolled_at")?.jsonPrimitive?.content
+                        if (enrolledAt.isNullOrBlank()) {
+                            try {
+                                val enrollPayload = buildJsonObject {
+                                    put("location", "running_activity")
+                                }
+                                val enrollResp = client.post("https://discord.com/api/v9/quests/$questId/enroll") {
+                                    header(HttpHeaders.Authorization, token)
+                                    header("User-Agent", USER_AGENT)
+                                    header("X-Super-Properties", SUPER_PROPERTIES)
+                                    contentType(ContentType.Application.Json)
+                                    setBody(enrollPayload.toString())
+                                }
+                                logger.i(TAG, "Quest $questId auto-enrolled with status: ${enrollResp.status.value}")
+                            } catch (e: Exception) {
+                                logger.w(TAG, "Failed to auto-enroll quest $questId: ${e.message}")
+                            }
+                        }
+
+                        // Send quest heartbeat
                         val bodyPayload = buildJsonObject {
                             put("stream_key", null as String?)
-                            put("application_id", applicationId)
+                            put("application_id", targetAppId)
                             put("terminal", terminal)
                             put("executable_path", null as String?)
                             put("executable_fingerprint", null as String?)
@@ -208,7 +291,7 @@ class GameTelemetryManager @Inject constructor(
                             contentType(ContentType.Application.Json)
                             setBody(bodyPayload.toString())
                         }
-                        logger.i(TAG, "Quest heartbeat sent for quest $questId (terminal=$terminal), status: ${questHbResp.status.value}")
+                        logger.i(TAG, "Quest heartbeat sent for quest $questId (targetAppId=$targetAppId, terminal=$terminal), status: ${questHbResp.status.value}")
                     }
                 }
             }
@@ -245,12 +328,12 @@ class GameTelemetryManager @Inject constructor(
                 )
 
                 // Terminal heartbeat to active Quests
-                val questIds = activeQuestIds[token]
-                questIds?.forEach { questId ->
+                val targetsMap = activeQuestTargets[token]
+                targetsMap?.forEach { (questId, targetAppId) ->
                     try {
                         val bodyPayload = buildJsonObject {
                             put("stream_key", null as String?)
-                            put("application_id", appId)
+                            put("application_id", targetAppId)
                             put("terminal", true)
                             put("executable_path", null as String?)
                             put("executable_fingerprint", null as String?)
@@ -262,6 +345,7 @@ class GameTelemetryManager @Inject constructor(
                             contentType(ContentType.Application.Json)
                             setBody(bodyPayload.toString())
                         }
+                        logger.i(TAG, "Sent terminal heartbeat for quest $questId")
                     } catch (e: Exception) {
                         logger.e(TAG, "Error sending terminal quest heartbeat: ${e.message}")
                     }
@@ -271,7 +355,7 @@ class GameTelemetryManager @Inject constructor(
 
         trackingJob?.cancel()
         trackingJob = null
-        activeQuestIds.clear()
+        activeQuestTargets.clear()
         currentGameName = null
         currentApplicationId = null
         logger.i(TAG, "Game telemetry tracking stopped gracefully.")

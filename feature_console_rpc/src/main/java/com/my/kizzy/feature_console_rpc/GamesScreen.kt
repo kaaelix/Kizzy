@@ -220,10 +220,10 @@ fun GamesScreen(
                                     val string = Json.encodeToString(
                                         RpcConfig(
                                             name = info.game_title,
-                                            details = info.platform,
+                                            details = "",
                                             platform = "desktop",
                                             timestampsStart = System.currentTimeMillis().toString(),
-                                            status = "dnd",
+                                            status = "online",
                                             largeImg = info.large_image ?: "",
                                             smallImg = info.small_image,
                                             type = "0",

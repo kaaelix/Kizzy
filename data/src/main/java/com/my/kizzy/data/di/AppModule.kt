@@ -100,6 +100,7 @@ object AppModule {
     }
 
     @Provides
+    @Singleton
     fun providesKizzyRepository(
         apiService: ApiService,
         imgurApiService: ImgurApiService

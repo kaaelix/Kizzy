@@ -24,11 +24,13 @@ import com.my.kizzy.domain.use_case.get_games.GetGamesUseCase
 import com.my.kizzy.resources.R
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 @HiltViewModel
@@ -52,9 +54,10 @@ class GamesViewModel @Inject constructor(
         getGamesUseCase().onEach { result ->
             when (result) {
                 is Resource.Success -> {
-                    _state.value = GamesState.Success(games = result.data ?: emptyList())
+                    val allGames = result.data ?: emptyList()
                     games.clear()
-                    games.addAll(result.data ?: emptyList())
+                    games.addAll(allGames)
+                    _state.value = GamesState.Success(games = allGames.take(100))
                 }
 
                 is Resource.Error -> {
@@ -85,25 +88,22 @@ class GamesViewModel @Inject constructor(
     private fun onSearch(query: String) {
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            delay(500)
+            delay(250)
             searchForGame(query)
         }
     }
 
-    private fun searchForGame(query: String) = if (query.trim() == "")
-        _state.value = GamesState.Success(games = games)
-    else {
-        val newList = games.filter {
-            it.game_title.contains(query.trim(), ignoreCase = true)
+    private fun searchForGame(query: String) {
+        viewModelScope.launch(Dispatchers.Default) {
+            val q = query.trim()
+            val filtered = if (q.isEmpty()) {
+                games.take(100)
+            } else {
+                games.filter { it.game_title.contains(q, ignoreCase = true) }.take(100)
+            }
+            withContext(Dispatchers.Main) {
+                _state.value = GamesState.Success(games = filtered)
+            }
         }
-        _state.value = GamesState.Success(games = newList)
     }
 }
-
-
-
-
-
-
-
-

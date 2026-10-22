@@ -53,8 +53,17 @@ class KizzyRepositoryImpl @Inject constructor(
         }
     }
 
+    companion object {
+        private var inMemoryGames: List<Game>? = null
+    }
+
     override suspend fun getGames(): List<Game> {
-        return api.getGames().getOrThrow().body<List<GamesResponse>>().map { it.toGame() }
+        inMemoryGames?.let {
+            if (it.isNotEmpty()) return it
+        }
+        val fetched = api.getGames().getOrThrow().body<List<GamesResponse>>().map { it.toGame() }
+        inMemoryGames = fetched
+        return fetched
     }
 
     override suspend fun getApplicationDetails(appId: String): Game? {
