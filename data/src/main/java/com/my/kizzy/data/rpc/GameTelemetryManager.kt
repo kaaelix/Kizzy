@@ -60,6 +60,10 @@ class GameTelemetryManager @Inject constructor(
         val tokens = Prefs.getActiveRpcTokens()
         if (tokens.isEmpty()) return
 
+        val oldGameName = currentGameName
+        val oldAppId = currentApplicationId
+        val oldStartTime = sessionStartTime
+
         currentGameName = gameName
         currentApplicationId = applicationId
         sessionStartTime = System.currentTimeMillis()
@@ -68,6 +72,12 @@ class GameTelemetryManager @Inject constructor(
 
         trackingJob?.cancel()
         trackingJob = scope.launch {
+            // If switching from another game, gracefully finalize previous session first
+            if (!oldGameName.isNullOrBlank() && !oldAppId.isNullOrBlank() &&
+                (oldGameName != gameName || oldAppId != applicationId)) {
+                finalizeGameSession(oldGameName, oldAppId, oldStartTime, tokens)
+            }
+
             val resolvedAppId = resolveApplicationId(gameName, applicationId)
             logger.i(TAG, "Resolved application ID for '$gameName': $resolvedAppId")
 
@@ -77,6 +87,57 @@ class GameTelemetryManager @Inject constructor(
                 }
             }
         }
+    }
+
+    private suspend fun finalizeGameSession(
+        gameName: String,
+        appId: String,
+        startTime: Long,
+        tokens: List<String>
+    ) {
+        val elapsed = (System.currentTimeMillis() - startTime).coerceAtLeast(1000L)
+        logger.i(TAG, "Finalizing session for previous game '$gameName' (duration: ${elapsed}ms)")
+        tokens.forEach { token ->
+            val analyticsToken = accountAnalyticsTokens[token]
+            val sessionId = accountSessionIds[token] ?: UUID.randomUUID().toString()
+
+            // Final heartbeat to /science
+            sendScienceHeartbeat(
+                token = token,
+                analyticsToken = analyticsToken,
+                sessionId = sessionId,
+                seq = 9999,
+                applicationId = appId,
+                gameName = gameName,
+                isInitial = false,
+                isFinal = true,
+                durationTrackedMs = elapsed
+            )
+
+            // Terminal heartbeat to active Quests for previous game
+            val targetsMap = activeQuestTargets[token]
+            targetsMap?.forEach { (questId, targetAppId) ->
+                try {
+                    val bodyPayload = buildJsonObject {
+                        put("stream_key", null as String?)
+                        put("application_id", targetAppId)
+                        put("terminal", true)
+                        put("executable_path", null as String?)
+                        put("executable_fingerprint", null as String?)
+                    }
+                    client.post("https://discord.com/api/v9/quests/$questId/heartbeat") {
+                        header(HttpHeaders.Authorization, token)
+                        header("User-Agent", USER_AGENT)
+                        header("X-Super-Properties", SUPER_PROPERTIES)
+                        contentType(ContentType.Application.Json)
+                        setBody(bodyPayload.toString())
+                    }
+                } catch (e: Exception) {
+                    logger.d(TAG, "Terminal quest heartbeat failed: ${e.message}")
+                }
+            }
+        }
+        activeQuestTargets.clear()
     }
 
     private suspend fun resolveApplicationId(gameName: String, rawAppId: String): String {

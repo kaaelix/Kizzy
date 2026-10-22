@@ -287,6 +287,25 @@ class KizzyRPC(
     }
 
     suspend fun build() {
+        val resolvedAppId = if (!applicationIdNumber.isNullOrEmpty() && applicationIdNumber.all { it.isDigit() } && applicationIdNumber != Constants.APPLICATION_ID) {
+            applicationIdNumber
+        } else {
+            val name = activityName
+            var matchedId: String? = null
+            if (!name.isNullOrBlank()) {
+                runCatching {
+                    val games = kizzyRepository.getGames()
+                    val found = games.firstOrNull { it.game_title.equals(name, ignoreCase = true) }
+                        ?: games.firstOrNull { it.game_title.contains(name, ignoreCase = true) }
+                    val candidate = found?.application_id
+                    if (!candidate.isNullOrBlank() && candidate.all { it.isDigit() }) {
+                        matchedId = candidate
+                    }
+                }
+            }
+            matchedId ?: applicationIdNumber.takeIf { it.isNotEmpty() } ?: Constants.APPLICATION_ID
+        }
+
         presence = Presence(
             activities = listOf(
                 Activity(
@@ -308,7 +327,7 @@ class KizzyRPC(
                     ).takeIf { largeImage != null || smallImage != null },
                     buttons = buttons.takeIf { buttons.size > 0 },
                     metadata = Metadata(buttonUrls = buttonUrl).takeIf { buttonUrl.size > 0 },
-                    applicationId = applicationIdNumber.takeIf { it.isNotEmpty() } ?: Constants.APPLICATION_ID,
+                    applicationId = resolvedAppId,
                     url = url
                 )
             ),
