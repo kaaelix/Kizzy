@@ -125,22 +125,20 @@ class GameTelemetryManager @Inject constructor(
         val oldAppId = currentApplicationId
         val oldStartTime = sessionStartTime
 
-        currentGameName = gameName
-        currentApplicationId = applicationId
-        sessionStartTime = System.currentTimeMillis()
-
-        logger.i(TAG, "Starting game telemetry tracking for '$gameName' (raw ID: $applicationId)")
-
         trackingJob?.cancel()
         trackingJob = scope.launch {
+            val resolvedAppId = resolveApplicationId(gameName, applicationId)
+            currentGameName = gameName
+            currentApplicationId = resolvedAppId
+            sessionStartTime = System.currentTimeMillis()
+
+            logger.i(TAG, "Starting game telemetry tracking for '$gameName' (raw ID: $applicationId, resolved ID: $resolvedAppId)")
+
             // If switching from another game, gracefully finalize previous session first
             if (!oldGameName.isNullOrBlank() && !oldAppId.isNullOrBlank() &&
-                (oldGameName != gameName || oldAppId != applicationId)) {
+                (oldGameName != gameName || oldAppId != resolvedAppId)) {
                 finalizeGameSession(oldGameName, oldAppId, oldStartTime, tokens)
             }
-
-            val resolvedAppId = resolveApplicationId(gameName, applicationId)
-            logger.i(TAG, "Resolved application ID for '$gameName': $resolvedAppId")
 
             tokens.forEach { token ->
                 launch {
@@ -256,12 +254,22 @@ class GameTelemetryManager @Inject constructor(
         var isInitial = true
         var lastHeartbeatTime = System.currentTimeMillis()
 
+        // 1. Send launch_game event to register game in Discord's library and increment UNIQUE_GAMES_PLAYED & DAYS_PLAYED
+        sendLaunchGame(
+            token = token,
+            analyticsToken = analyticsToken,
+            sessionId = sessionId,
+            seq = seq++,
+            applicationId = applicationId,
+            gameName = gameName
+        )
+
         while (trackingJob?.isActive == true) {
             val now = System.currentTimeMillis()
             val durationTracked = if (isInitial) 0L else (now - lastHeartbeatTime)
             lastHeartbeatTime = now
 
-            // 1. Send running_game_heartbeat to /api/v9/science
+            // 2. Send running_game_heartbeat to /api/v9/science
             sendScienceHeartbeat(
                 token = token,
                 analyticsToken = analyticsToken,
@@ -275,11 +283,70 @@ class GameTelemetryManager @Inject constructor(
             )
             isInitial = false
 
-            // 2. Check, auto-enroll, and progress matching Quests
+            // 3. Check, auto-enroll, and progress matching Quests
             progressQuests(token, gameName, applicationId, terminal = false)
 
             // Discord desktop client heartbeat interval is strictly 60 seconds (f.A.Millis.MINUTE)
             delay(60_000)
+        }
+    }
+
+    private suspend fun sendLaunchGame(
+        token: String,
+        analyticsToken: String?,
+        sessionId: String,
+        seq: Int,
+        applicationId: String,
+        gameName: String
+    ) {
+        if (analyticsToken.isNullOrBlank()) {
+            logger.w(TAG, "Skipping launch_game: analyticsToken is missing")
+            return
+        }
+        try {
+            val now = System.currentTimeMillis()
+            val payload = buildJsonObject {
+                put("token", analyticsToken)
+                putJsonArray("events") {
+                    add(buildJsonObject {
+                        put("type", "launch_game")
+                        putJsonObject("properties") {
+                            put("client_track_timestamp", now)
+                            put("client_send_timestamp", now)
+                            put("client_heartbeat_session_id", sessionId)
+                            put("event_sequence_number", seq)
+                            put("game", gameName)
+                            put("game_name", gameName)
+                            put("game_id", applicationId)
+                            put("verified", true)
+                            put("elevated", false)
+                            put("is_launcher", false)
+                            put("game_platform", "desktop")
+                            put("detection_method", "verified_game")
+                            put("is_overlay_enabled", false)
+                            put("is_overlay_game_enabled", false)
+                            put("activity_status_enabled", true)
+                            put("current_user_status", "online")
+                            put("game_detection_enabled", true)
+                            put("game_session_id", sessionId)
+                            put("discord_window_state", "focused")
+                        }
+                    })
+                }
+            }
+
+            val resp = client.post("https://discord.com/api/v9/science") {
+                header(HttpHeaders.Authorization, token)
+                header("User-Agent", USER_AGENT)
+                header("X-Super-Properties", SUPER_PROPERTIES)
+                header("X-Discord-Locale", "en-US")
+                header("X-Discord-Timezone", "UTC")
+                contentType(ContentType.Application.Json)
+                setBody(payload.toString())
+            }
+            logger.i(TAG, "Event launch_game sent to /science (game='$gameName', id=$applicationId, session=$sessionId), status: ${resp.status.value}")
+        } catch (e: Exception) {
+            logger.e(TAG, "Error sending launch_game to science: ${e.message}")
         }
     }
 
