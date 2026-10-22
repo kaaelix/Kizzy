@@ -548,7 +548,7 @@ class GameTelemetryManager @Inject constructor(
                 logger.w(TAG, "Fetching quests/@me returned status: ${questsResp.status.value}")
             }
         } catch (e: Exception) {
-            logger.e(TAG, "Quests progress error: ${e.message}", e)
+            logger.e(TAG, "Quests progress error: ${e.message}")
         }
     }
 
