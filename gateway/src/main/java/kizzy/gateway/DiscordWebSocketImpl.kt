@@ -240,4 +240,19 @@ open class DiscordWebSocketImpl(
         )
     }
 
+    override suspend fun clearActivity() {
+        if (isSocketConnectedToAccount()) {
+            logger.i("Gateway", "Clearing presence activities (graceful stop for Recent Activity)")
+            send(
+                op = PRESENCE_UPDATE,
+                d = Presence(
+                    activities = emptyList(),
+                    afk = false,
+                    since = 0L,
+                    status = "online"
+                )
+            )
+        }
+    }
+
 }

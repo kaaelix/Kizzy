@@ -125,9 +125,15 @@ class CustomRpcService : Service() {
     }
 
     override fun onDestroy() {
-        scope.cancel()
-        gameTelemetryManager.stop()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(2500) {
+                gameTelemetryManager.stop()
+                kizzyRPC.clearRPC()
+                kotlinx.coroutines.delay(800)
+            }
+        }
         kizzyRPC.closeRPC()
+        scope.cancel()
         wakeLock?.let {
             if (it.isHeld) it.release()
         }

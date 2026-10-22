@@ -79,9 +79,15 @@ class AppDetectionService : Service() {
     }
 
     override fun onDestroy() {
-        scope.cancel()
-        gameTelemetryManager.stop()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(2500) {
+                gameTelemetryManager.stop()
+                kizzyRPC.clearRPC()
+                delay(800)
+            }
+        }
         kizzyRPC.closeRPC()
+        scope.cancel()
         super.onDestroy()
     }
 
@@ -236,11 +242,15 @@ class AppDetectionService : Service() {
     }
 
     private fun handleDisabledPackage() {
-        gameTelemetryManager.stop()
-        if (kizzyRPC.isRpcRunning()) {
-            kizzyRPC.closeRPC()
+        scope.launch {
+            gameTelemetryManager.stop()
+            if (kizzyRPC.isRpcRunning()) {
+                kizzyRPC.clearRPC()
+                delay(800)
+                kizzyRPC.closeRPC()
+            }
+            notificationManager.notify(Constants.NOTIFICATION_ID, createDefaultNotification())
         }
-        notificationManager.notify(Constants.NOTIFICATION_ID, createDefaultNotification())
     }
 
     private fun createDefaultNotification(): Notification {

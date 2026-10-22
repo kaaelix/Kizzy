@@ -88,6 +88,18 @@ class MultiDiscordWebSocket(
         return socketMap.values.isNotEmpty() && socketMap.values.any { it.isWebSocketConnected() }
     }
 
+    override suspend fun clearActivity() {
+        val sockets = syncSockets()
+        logger.i("MultiGateway", "Clearing presence activities across ${sockets.size} account(s)")
+        sockets.forEach { socket ->
+            try {
+                socket.clearActivity()
+            } catch (e: Exception) {
+                logger.e("MultiGateway", "Failed to clear activity: ${e.message}")
+            }
+        }
+    }
+
     override fun close() {
         logger.i("MultiGateway", "Closing ${socketMap.size} socket(s)")
         socketMap.values.forEach {

@@ -54,6 +54,12 @@ class KizzyRPC(
         discordWebSocket.close()
     }
 
+    suspend fun clearRPC() {
+        runCatching {
+            discordWebSocket.clearActivity()
+        }
+    }
+
     fun isRpcRunning(): Boolean {
         return discordWebSocket.isWebSocketConnected()
     }
@@ -306,9 +312,9 @@ class KizzyRPC(
                     url = url
                 )
             ),
-            afk = true,
-            since = startTimestamps.takeIf { startTimestamps != null }?: System.currentTimeMillis(),
-            status = status
+            afk = false,
+            since = 0L,
+            status = status ?: "online"
         )
         connectToWebSocket()
     }
@@ -354,9 +360,9 @@ class KizzyRPC(
 
                     )
                 ),
-                afk = true,
-                since = startTimestamps,
-                status = this.status
+                afk = false,
+                since = 0L,
+                status = this.status ?: "online"
             )
         )
     }

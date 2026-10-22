@@ -232,8 +232,14 @@ class MediaRpcService : Service() {
     override fun onDestroy() {
         mediaSessionManager.removeOnActiveSessionsChangedListener(::activeSessionsListener)
         currentMediaController?.unregisterCallback(mediaControllerCallback)
-        scope.cancel()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(2000) {
+                kizzyRPC.clearRPC()
+                kotlinx.coroutines.delay(500)
+            }
+        }
         kizzyRPC.closeRPC()
+        scope.cancel()
         wakeLock?.let {
             if (it.isHeld) it.release()
         }
